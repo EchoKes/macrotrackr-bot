@@ -121,15 +121,12 @@ def analyze_meal_with_openai(image_base64: str, caption: str) -> Optional[str]:
         
         Provide a detailed calorie and macro breakdown in this exact format:
         
-        Meal: [brief summary of the meal]
-        Breakdown:
-        - [food item 1]: [calories] kcal | P [protein]g | C [carbs]g | F [fat]g
-        - [food item 2]: [calories] kcal | P [protein]g | C [carbs]g | F [fat]g
+        *Meal:* [brief summary of the meal]
+        *Breakdown:*
+        • [food item 1]: [calories] kcal | P [protein]g | C [carbs]g | F [fat]g
+        • [food item 2]: [calories] kcal | P [protein]g | C [carbs]g | F [fat]g
         [continue for all visible items]
-        Total: [total calories] kcal | P [total protein]g | C [total carbs]g | F [total fat]g
-        Assumptions: [brief note about portion size assumptions or uncertainties]
-        
-        Be realistic with portion sizes and provide your best estimates based on visual cues.
+        *Total:* [total calories] kcal | P [total protein]g | C [total carbs]g | F [total fat]g
         """
         
         response = openai.ChatCompletion.create(
