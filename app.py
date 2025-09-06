@@ -6,6 +6,8 @@ import requests
 import openai
 from typing import Dict, Any, Optional
 import base64
+import re
+from datetime import datetime, timedelta
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +27,9 @@ openai.api_key = OPENAI_API_KEY
 # Telegram API base URL
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
+# Daily calorie target (constant)
+DAILY_CALORIE_TARGET = 1350
+
 def validate_environment() -> None:
     """Validate that all required environment variables are set."""
     required_vars = ['TELEGRAM_BOT_TOKEN', 'OPENAI_API_KEY', 'CHANNEL_ID']
@@ -32,6 +37,116 @@ def validate_environment() -> None:
     
     if missing_vars:
         raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+def get_daily_window_timestamps() -> tuple:
+    """
+    Get start and end timestamps for the current 24-hour cycle (5am to 5am).
+    Returns tuple of (start_timestamp, end_timestamp).
+    """
+    now = datetime.now()
+    
+    # Get today's 5am
+    today_5am = now.replace(hour=5, minute=0, second=0, microsecond=0)
+    
+    # If current time is before 5am, use yesterday's 5am as start
+    if now.hour < 5:
+        start_time = today_5am - timedelta(days=1)
+        end_time = today_5am
+    else:
+        # If current time is after 5am, use today's 5am as start
+        start_time = today_5am
+        end_time = today_5am + timedelta(days=1)
+    
+    return start_time, end_time
+
+def extract_total_calories(analysis_text: str) -> int:
+    """
+    Extract total calories from the *Total:* line in meal analysis.
+    Pattern: *Total:* [calories] kcal | P [protein]g | C [carbs]g | F [fat]g
+    Returns 0 if no calories found.
+    """
+    pattern = r'Total.*?(\d+).*?kcal'
+    match = re.search(pattern, analysis_text)
+    
+    if match:
+        return int(match.group(1))
+    
+    return 0
+
+def get_channel_messages_since(start_time: datetime) -> list:
+    """
+    Get all messages from the channel since start_time.
+    This is a stateless approach using Telegram API.
+    """
+    try:
+        # Get recent messages from the channel
+        url = f"{TELEGRAM_API_URL}/getUpdates"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        
+        updates = response.json().get('result', [])
+        messages = []
+        
+        for update in updates:
+            if 'channel_post' in update:
+                message = update['channel_post']
+                message_date = datetime.fromtimestamp(message['date'])
+                
+                # Only include messages within our time window
+                if message_date >= start_time and 'text' in message:
+                    messages.append(message['text'])
+        
+        return messages
+        
+    except Exception as e:
+        logger.error(f"Failed to get channel messages: {e}")
+        return []
+
+def calculate_daily_progress() -> dict:
+    """
+    Calculate current daily calorie progress.
+    Returns dict with progress information.
+    """
+    start_time, end_time = get_daily_window_timestamps()
+    messages = get_channel_messages_since(start_time)
+    
+    total_calories = 0
+    
+    for message in messages:
+        calories = extract_total_calories(message)
+        if calories > 0:
+            total_calories += calories
+    
+    percentage = min(100, round((total_calories / DAILY_CALORIE_TARGET) * 100)) if DAILY_CALORIE_TARGET > 0 else 0
+    remaining_calories = max(0, DAILY_CALORIE_TARGET - total_calories)
+    
+    return {
+        'total_calories': total_calories,
+        'target_calories': DAILY_CALORIE_TARGET,
+        'percentage': percentage,
+        'remaining_calories': remaining_calories
+    }
+
+def create_progress_bar(percentage: int, length: int = 20) -> str:
+    """
+    Create a visual progress bar.
+    """
+    filled_length = round(length * percentage / 100)
+    bar = '█' * filled_length + '░' * (length - filled_length)
+    return f"[{bar}]"
+
+def format_progress_message(progress: dict) -> str:
+    """
+    Format the progress information into a message focused on remaining calories.
+    """
+    progress_bar = create_progress_bar(progress['percentage'])
+    
+    message = f"""📊 *Daily Calorie Progress*
+{progress_bar} {progress['total_calories']} / {progress['target_calories']} kcal ({progress['percentage']}%)
+
+🎯 Remaining: {progress['remaining_calories']} kcal"""
+    
+    return message
 
 def send_telegram_message(chat_id: str, text: str, photo_file_id: Optional[str] = None) -> bool:
     """
@@ -53,7 +168,7 @@ def send_telegram_message(chat_id: str, text: str, photo_file_id: Optional[str] 
                 'chat_id': chat_id,
                 'photo': photo_file_id,
                 'caption': text,
-                'parse_mode': 'HTML'
+'parse_mode': 'Markdown'
             }
         else:
             # Send text message
@@ -61,7 +176,7 @@ def send_telegram_message(chat_id: str, text: str, photo_file_id: Optional[str] 
             data = {
                 'chat_id': chat_id,
                 'text': text,
-                'parse_mode': 'HTML'
+'parse_mode': 'Markdown'
             }
         
         response = requests.post(url, json=data, timeout=10)
@@ -209,7 +324,7 @@ def process_meal_photo(message: Dict[str, Any]) -> None:
             return
         
         # Format final message
-        formatted_message = f"📊 <b>Meal Analysis for {user_name}</b>\n\n{analysis}"
+        formatted_message = f"📊 *Meal Analysis for {user_name}*\n\n{analysis}"
         
         # Send result back to user
         send_telegram_message(chat_id, f"✅ Analysis complete!\n\n{formatted_message}")
@@ -219,6 +334,11 @@ def process_meal_photo(message: Dict[str, Any]) -> None:
         
         if channel_success:
             send_telegram_message(chat_id, "📤 Posted to tracking channel!")
+            
+            # Show daily progress after successful meal submission
+            progress = calculate_daily_progress()
+            progress_message = format_progress_message(progress)
+            send_telegram_message(chat_id, progress_message)
         else:
             send_telegram_message(chat_id, "⚠️ Analysis complete but failed to post to channel.")
             
@@ -266,15 +386,26 @@ def webhook():
             if 'photo' in message:
                 process_meal_photo(message)
             else:
-                # Send help message for text-only messages
+                # Handle text messages
                 chat_id = str(message['chat']['id'])
-                help_text = (
-                    "🍽️ <b>Macro Tracker Bot</b>\n\n"
-                    "Send me a photo of your meal with a brief description as the caption, "
-                    "and I'll analyze the calories and macros for you!\n\n"
-                    "Example: Send a photo with caption 'Grilled chicken breast with rice and vegetables'"
-                )
-                send_telegram_message(chat_id, help_text)
+                text = message.get('text', '').strip()
+                
+                # Check for /progress command
+                if text.lower() == '/progress':
+                    progress = calculate_daily_progress()
+                    progress_message = format_progress_message(progress)
+                    send_telegram_message(chat_id, progress_message)
+                else:
+                    # Send help message for other text messages
+                    help_text = (
+                        "🍽️ *Macro Tracker Bot*\n\n"
+                        "Send me a photo of your meal with a brief description as the caption, "
+                        "and I'll analyze the calories and macros for you!\n\n"
+                        "Commands:\n"
+                        "• /progress - View your daily calorie progress\n\n"
+                        "Example: Send a photo with caption 'Grilled chicken breast with rice and vegetables'"
+                    )
+                    send_telegram_message(chat_id, help_text)
         
         return jsonify({'status': 'ok'}), 200
         
