@@ -55,9 +55,7 @@ class OpenAIService:
                             }
                         ]
                     }
-                ],
-                max_tokens=500,
-                temperature=0.3
+                ]
             )
             
             result = response.choices[0].message.content.strip()
