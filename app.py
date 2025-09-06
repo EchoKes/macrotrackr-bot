@@ -8,6 +8,9 @@ from typing import Dict, Any, Optional
 import base64
 import re
 from datetime import datetime, timedelta
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from urllib.parse import urlparse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -20,6 +23,7 @@ app = Flask(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 # Initialize OpenAI client
 openai.api_key = OPENAI_API_KEY
@@ -32,11 +36,103 @@ DAILY_CALORIE_TARGET = 1350
 
 def validate_environment() -> None:
     """Validate that all required environment variables are set."""
-    required_vars = ['TELEGRAM_BOT_TOKEN', 'OPENAI_API_KEY', 'CHANNEL_ID']
+    required_vars = ['TELEGRAM_BOT_TOKEN', 'OPENAI_API_KEY', 'CHANNEL_ID', 'DATABASE_URL']
     missing_vars = [var for var in required_vars if not os.getenv(var)]
     
     if missing_vars:
         raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+def get_db_connection():
+    """Get a connection to the PostgreSQL database."""
+    try:
+        return psycopg2.connect(DATABASE_URL)
+    except Exception as e:
+        logger.error(f"Failed to connect to database: {e}")
+        return None
+
+def init_database():
+    """Initialize the database table for meal calories."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        
+        with conn.cursor() as cur:
+            # Create table if it doesn't exist
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS meal_calories (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    user_name VARCHAR(255),
+                    calories INTEGER NOT NULL,
+                    meal_analysis TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+            """)
+            
+            # Create index on user_id and created_at for faster queries
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_meal_calories_user_date 
+                ON meal_calories(user_id, created_at);
+            """)
+            
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        return False
+
+def store_meal_calories(user_id: int, user_name: str, calories: int, meal_analysis: str) -> bool:
+    """Store meal calories in the database."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO meal_calories (user_id, user_name, calories, meal_analysis)
+                VALUES (%s, %s, %s, %s)
+            """, (user_id, user_name, calories, meal_analysis))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Stored {calories} calories for user {user_name}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to store meal calories: {e}")
+        return False
+
+def get_daily_calories(user_id: int) -> int:
+    """Get total calories for the user within the current 5am-to-5am window."""
+    try:
+        start_time, _ = get_daily_window_timestamps()
+        
+        conn = get_db_connection()
+        if not conn:
+            return 0
+        
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(calories), 0) as total_calories
+                FROM meal_calories
+                WHERE user_id = %s AND created_at >= %s
+            """, (user_id, start_time))
+            
+            result = cur.fetchone()
+            total_calories = result[0] if result else 0
+        
+        conn.close()
+        logger.info(f"Retrieved {total_calories} total calories for user {user_id}")
+        return total_calories
+        
+    except Exception as e:
+        logger.error(f"Failed to get daily calories: {e}")
+        return 0
 
 def get_daily_window_timestamps() -> tuple:
     """
@@ -90,101 +186,12 @@ def extract_total_calories(analysis_text: str) -> int:
     logger.warning(f"Could not extract calories from text: {analysis_text[:200]}...")
     return 0
 
-def get_channel_messages_since(start_time: datetime) -> list:
+def calculate_daily_progress(user_id: int) -> dict:
     """
-    Get all messages from the channel since start_time using getChatHistory.
-    This is a stateless approach using Telegram API.
-    """
-    try:
-        # First, get chat info to ensure we have access
-        chat_info_url = f"{TELEGRAM_API_URL}/getChat"
-        chat_response = requests.get(chat_info_url, params={'chat_id': CHANNEL_ID}, timeout=10)
-        
-        if not chat_response.ok:
-            logger.error(f"Failed to get chat info: {chat_response.text}")
-            return []
-        
-        # Get recent messages from the channel using getChatHistory
-        # We'll fetch the last 15 messages to cover potential meals in the last 24 hours
-        history_url = f"{TELEGRAM_API_URL}/getChatHistory"
-        params = {
-            'chat_id': CHANNEL_ID,
-            'limit': 15,
-            'offset': 0
-        }
-        
-        response = requests.get(history_url, params=params, timeout=10)
-        
-        # If getChatHistory doesn't work, try getUpdates as fallback
-        if not response.ok:
-            logger.warning("getChatHistory failed, trying alternative approach")
-            return get_channel_messages_fallback(start_time)
-        
-        result = response.json()
-        if not result.get('ok'):
-            logger.warning("getChatHistory not successful, trying alternative approach")
-            return get_channel_messages_fallback(start_time)
-            
-        messages = []
-        chat_messages = result.get('result', {}).get('messages', [])
-        
-        for message in chat_messages:
-            if 'date' in message and 'text' in message:
-                message_date = datetime.fromtimestamp(message['date'])
-                
-                # Only include messages within our time window
-                if message_date >= start_time:
-                    messages.append(message['text'])
-        
-        return messages
-        
-    except Exception as e:
-        logger.error(f"Failed to get channel messages: {e}")
-        return get_channel_messages_fallback(start_time)
-
-def get_channel_messages_fallback(start_time: datetime) -> list:
-    """
-    Fallback method to get channel messages using getUpdates.
-    """
-    try:
-        url = f"{TELEGRAM_API_URL}/getUpdates"
-        params = {'limit': 15, 'allowed_updates': ['channel_post']}
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        
-        updates = response.json().get('result', [])
-        messages = []
-        
-        for update in updates:
-            if 'channel_post' in update:
-                message = update['channel_post']
-                if message.get('chat', {}).get('id') == CHANNEL_ID or str(message.get('chat', {}).get('username', '')).replace('@', '') == CHANNEL_ID.replace('@', ''):
-                    message_date = datetime.fromtimestamp(message['date'])
-                    
-                    # Only include messages within our time window
-                    if message_date >= start_time and 'text' in message:
-                        messages.append(message['text'])
-        
-        return messages
-        
-    except Exception as e:
-        logger.error(f"Fallback method also failed: {e}")
-        return []
-
-def calculate_daily_progress() -> dict:
-    """
-    Calculate current daily calorie progress.
+    Calculate current daily calorie progress from database.
     Returns dict with progress information.
     """
-    start_time, end_time = get_daily_window_timestamps()
-    messages = get_channel_messages_since(start_time)
-    
-    total_calories = 0
-    
-    for message in messages:
-        calories = extract_total_calories(message)
-        if calories > 0:
-            total_calories += calories
+    total_calories = get_daily_calories(user_id)
     
     percentage = min(100, round((total_calories / DAILY_CALORIE_TARGET) * 100)) if DAILY_CALORIE_TARGET > 0 else 0
     remaining_calories = max(0, DAILY_CALORIE_TARGET - total_calories)
@@ -392,6 +399,10 @@ def process_meal_photo(message: Dict[str, Any]) -> None:
             )
             return
         
+        # Extract calories from the analysis
+        calories = extract_total_calories(analysis)
+        user_id = message['from']['id']
+        
         # Format final message
         formatted_message = f"📊 *Meal Analysis for {user_name}*\n\n{analysis}"
         
@@ -404,10 +415,18 @@ def process_meal_photo(message: Dict[str, Any]) -> None:
         if channel_success:
             send_telegram_message(chat_id, "📤 Posted to tracking channel!")
             
-            # Show daily progress after successful meal submission
-            progress = calculate_daily_progress()
-            progress_message = format_progress_message(progress)
-            send_telegram_message(chat_id, progress_message)
+            # Store calories in database
+            if calories > 0:
+                store_success = store_meal_calories(user_id, user_name, calories, analysis)
+                if store_success:
+                    # Show daily progress after successful meal submission and storage
+                    progress = calculate_daily_progress(user_id)
+                    progress_message = format_progress_message(progress)
+                    send_telegram_message(chat_id, progress_message)
+                else:
+                    logger.warning(f"Failed to store calories for user {user_name}")
+            else:
+                logger.warning(f"No calories extracted from analysis for user {user_name}")
         else:
             send_telegram_message(chat_id, "⚠️ Analysis complete but failed to post to channel.")
             
@@ -424,10 +443,20 @@ def health_check():
     """Health check endpoint for Render."""
     try:
         validate_environment()
+        
+        # Check database connection
+        conn = get_db_connection()
+        if conn:
+            conn.close()
+            db_status = 'connected'
+        else:
+            db_status = 'disconnected'
+        
         return jsonify({
             'status': 'healthy',
             'service': 'macrotrackr-bot',
-            'environment': 'production'
+            'environment': 'production',
+            'database': db_status
         }), 200
     except Exception as e:
         return jsonify({
@@ -461,7 +490,8 @@ def webhook():
                 
                 # Check for /progress command
                 if text.lower() == '/progress':
-                    progress = calculate_daily_progress()
+                    user_id = message['from']['id']
+                    progress = calculate_daily_progress(user_id)
                     progress_message = format_progress_message(progress)
                     send_telegram_message(chat_id, progress_message)
                 else:
@@ -496,6 +526,11 @@ if __name__ == '__main__':
     try:
         validate_environment()
         logger.info("Starting MacroTrackr Bot...")
+        
+        # Initialize database
+        if not init_database():
+            logger.error("Failed to initialize database, but continuing...")
+        
         app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False)
     except Exception as e:
         logger.error(f"Failed to start application: {e}")
