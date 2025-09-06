@@ -473,6 +473,27 @@ def health_check():
             'error': str(e)
         }), 500
 
+@app.route('/init-db', methods=['GET'])
+def init_db_endpoint():
+    """Manual database initialization endpoint."""
+    try:
+        success = init_database()
+        if success:
+            return jsonify({
+                'status': 'success',
+                'message': 'Database initialized successfully'
+            }), 200
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to initialize database - check logs'
+            }), 500
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Database initialization error: {str(e)}'
+        }), 500
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Handle incoming Telegram webhook updates."""
