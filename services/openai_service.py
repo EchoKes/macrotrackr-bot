@@ -43,7 +43,7 @@ class OpenAIService:
             """
             
             response = openai.ChatCompletion.create(
-                model="gpt-5-nano",
+                model="gpt-4o-mini",
                 messages=[
                     {
                         "role": "user",
