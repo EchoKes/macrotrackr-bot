@@ -99,7 +99,12 @@ def process_meal_photo(message: Dict[str, Any]) -> None:
                     # Show daily progress after successful meal submission and storage
                     progress = ProgressService.calculate_daily_progress(user_id)
                     progress_message = ProgressService.format_progress_message(progress)
+                    
+                    # Send progress to user
                     TelegramService.send_message(chat_id, progress_message)
+                    
+                    # Also post progress to channel
+                    TelegramService.send_message(config.CHANNEL_ID, progress_message)
                 else:
                     logger.warning(f"Failed to store calories for user {user_name}")
             else:
@@ -157,6 +162,31 @@ def init_db_endpoint():
             'message': f'Database initialization error: {str(e)}'
         }), 500
 
+@app.route('/test-channel', methods=['GET'])
+def test_channel_endpoint():
+    """Test channel access endpoint for debugging."""
+    try:
+        result = TelegramService.test_channel_access()
+        if result['success']:
+            return jsonify({
+                'status': 'success',
+                'message': 'Channel access working',
+                'channel_info': result['chat_info'],
+                'channel_id': result['channel_id']
+            }), 200
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'Channel access failed',
+                'error': result['error'],
+                'channel_id': result['channel_id']
+            }), 400
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Channel test error: {str(e)}'
+        }), 500
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -188,7 +218,12 @@ def webhook():
                 if text.lower() == '/progress':
                     progress = ProgressService.calculate_daily_progress(user_id)
                     progress_message = ProgressService.format_progress_message(progress)
+                    
+                    # Send progress to user
                     TelegramService.send_message(chat_id, progress_message)
+                    
+                    # Also post progress to channel
+                    TelegramService.send_message(config.CHANNEL_ID, progress_message)
                 
                 # Check for /resetprogress command
                 elif text.lower() == '/resetprogress':
