@@ -8,13 +8,19 @@ from typing import Dict, Any, Optional
 import base64
 import re
 from datetime import datetime, timedelta
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from urllib.parse import urlparse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    from urllib.parse import urlparse
+    POSTGRES_AVAILABLE = True
+except ImportError as e:
+    logger.error(f"PostgreSQL dependencies not available: {e}")
+    POSTGRES_AVAILABLE = False
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -44,6 +50,9 @@ def validate_environment() -> None:
 
 def get_db_connection():
     """Get a connection to the PostgreSQL database."""
+    if not POSTGRES_AVAILABLE:
+        logger.error("PostgreSQL not available")
+        return None
     try:
         return psycopg2.connect(DATABASE_URL)
     except Exception as e:
