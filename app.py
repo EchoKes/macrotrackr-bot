@@ -61,27 +61,95 @@ def get_daily_window_timestamps() -> tuple:
 
 def extract_total_calories(analysis_text: str) -> int:
     """
-    Extract total calories from the *Total:* line in meal analysis.
-    Pattern: *Total:* [calories] kcal | P [protein]g | C [carbs]g | F [fat]g
+    Extract total calories from meal analysis text.
+    Tries multiple patterns to handle different formats.
     Returns 0 if no calories found.
     """
-    pattern = r'Total.*?(\d+).*?kcal'
-    match = re.search(pattern, analysis_text)
+    # Multiple patterns to handle different possible formats
+    patterns = [
+        r'\*Total\*:?\s*(\d+)\s*kcal',  # *Total:* 450 kcal
+        r'Total:?\s*(\d+)\s*kcal',      # Total: 450 kcal
+        r'Total.*?(\d+)\s*kcal',        # Total anything 450 kcal
+        r'(\d+)\s*kcal.*?total',        # 450 kcal ... total (case insensitive)
+        r'total.*?(\d+)\s*kcal',        # total ... 450 kcal (case insensitive)
+        r'(\d+)\s*kcal.*?P\s*\d+g.*?C\s*\d+g.*?F\s*\d+g',  # Pattern with macros
+    ]
     
-    if match:
-        return int(match.group(1))
+    for pattern in patterns:
+        match = re.search(pattern, analysis_text, re.IGNORECASE)
+        if match:
+            try:
+                calories = int(match.group(1))
+                # Sanity check: calories should be reasonable (between 0 and 3000)
+                if 0 <= calories <= 3000:
+                    logger.info(f"Extracted {calories} calories using pattern: {pattern}")
+                    return calories
+            except (ValueError, IndexError):
+                continue
     
+    logger.warning(f"Could not extract calories from text: {analysis_text[:200]}...")
     return 0
 
 def get_channel_messages_since(start_time: datetime) -> list:
     """
-    Get all messages from the channel since start_time.
+    Get all messages from the channel since start_time using getChatHistory.
     This is a stateless approach using Telegram API.
     """
     try:
-        # Get recent messages from the channel
+        # First, get chat info to ensure we have access
+        chat_info_url = f"{TELEGRAM_API_URL}/getChat"
+        chat_response = requests.get(chat_info_url, params={'chat_id': CHANNEL_ID}, timeout=10)
+        
+        if not chat_response.ok:
+            logger.error(f"Failed to get chat info: {chat_response.text}")
+            return []
+        
+        # Get recent messages from the channel using getChatHistory
+        # We'll fetch the last 15 messages to cover potential meals in the last 24 hours
+        history_url = f"{TELEGRAM_API_URL}/getChatHistory"
+        params = {
+            'chat_id': CHANNEL_ID,
+            'limit': 15,
+            'offset': 0
+        }
+        
+        response = requests.get(history_url, params=params, timeout=10)
+        
+        # If getChatHistory doesn't work, try getUpdates as fallback
+        if not response.ok:
+            logger.warning("getChatHistory failed, trying alternative approach")
+            return get_channel_messages_fallback(start_time)
+        
+        result = response.json()
+        if not result.get('ok'):
+            logger.warning("getChatHistory not successful, trying alternative approach")
+            return get_channel_messages_fallback(start_time)
+            
+        messages = []
+        chat_messages = result.get('result', {}).get('messages', [])
+        
+        for message in chat_messages:
+            if 'date' in message and 'text' in message:
+                message_date = datetime.fromtimestamp(message['date'])
+                
+                # Only include messages within our time window
+                if message_date >= start_time:
+                    messages.append(message['text'])
+        
+        return messages
+        
+    except Exception as e:
+        logger.error(f"Failed to get channel messages: {e}")
+        return get_channel_messages_fallback(start_time)
+
+def get_channel_messages_fallback(start_time: datetime) -> list:
+    """
+    Fallback method to get channel messages using getUpdates.
+    """
+    try:
         url = f"{TELEGRAM_API_URL}/getUpdates"
-        response = requests.get(url, timeout=10)
+        params = {'limit': 15, 'allowed_updates': ['channel_post']}
+        response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         
         updates = response.json().get('result', [])
@@ -90,16 +158,17 @@ def get_channel_messages_since(start_time: datetime) -> list:
         for update in updates:
             if 'channel_post' in update:
                 message = update['channel_post']
-                message_date = datetime.fromtimestamp(message['date'])
-                
-                # Only include messages within our time window
-                if message_date >= start_time and 'text' in message:
-                    messages.append(message['text'])
+                if message.get('chat', {}).get('id') == CHANNEL_ID or str(message.get('chat', {}).get('username', '')).replace('@', '') == CHANNEL_ID.replace('@', ''):
+                    message_date = datetime.fromtimestamp(message['date'])
+                    
+                    # Only include messages within our time window
+                    if message_date >= start_time and 'text' in message:
+                        messages.append(message['text'])
         
         return messages
         
     except Exception as e:
-        logger.error(f"Failed to get channel messages: {e}")
+        logger.error(f"Fallback method also failed: {e}")
         return []
 
 def calculate_daily_progress() -> dict:
