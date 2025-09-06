@@ -143,6 +143,32 @@ def get_daily_calories(user_id: int) -> int:
         logger.error(f"Failed to get daily calories: {e}")
         return 0
 
+def reset_daily_calories(user_id: int) -> bool:
+    """Reset (delete) all meal calories for the user within the current 5am-to-5am window."""
+    try:
+        start_time, _ = get_daily_window_timestamps()
+        
+        conn = get_db_connection()
+        if not conn:
+            return False
+        
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM meal_calories
+                WHERE user_id = %s AND created_at >= %s
+            """, (user_id, start_time))
+            
+            deleted_count = cur.rowcount
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Reset {deleted_count} meal entries for user {user_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to reset daily calories: {e}")
+        return False
+
 def get_daily_window_timestamps() -> tuple:
     """
     Get start and end timestamps for the current 24-hour cycle (5am to 5am).
@@ -524,6 +550,25 @@ def webhook():
                     progress = calculate_daily_progress(user_id)
                     progress_message = format_progress_message(progress)
                     send_telegram_message(chat_id, progress_message)
+                
+                # Check for /resetprogress command
+                elif text.lower() == '/resetprogress':
+                    user_id = message['from']['id']
+                    user_name = message['from'].get('first_name', 'Unknown')
+                    
+                    # Reset daily calories
+                    reset_success = reset_daily_calories(user_id)
+                    
+                    if reset_success:
+                        # Show updated progress (should be 0)
+                        progress = calculate_daily_progress(user_id)
+                        progress_message = format_progress_message(progress)
+                        
+                        reset_message = f"✅ *Daily progress reset for {user_name}*\n\n{progress_message}"
+                        send_telegram_message(chat_id, reset_message)
+                    else:
+                        send_telegram_message(chat_id, "❌ Failed to reset daily progress. Please try again.")
+                
                 else:
                     # Send help message for other text messages
                     help_text = (
@@ -531,7 +576,8 @@ def webhook():
                         "Send me a photo of your meal with a brief description as the caption, "
                         "and I'll analyze the calories and macros for you!\n\n"
                         "Commands:\n"
-                        "• /progress - View your daily calorie progress\n\n"
+                        "• /progress - View your daily calorie progress\n"
+                        "• /resetprogress - Reset your daily calorie progress\n\n"
                         "Example: Send a photo with caption 'Grilled chicken breast with rice and vegetables'"
                     )
                     send_telegram_message(chat_id, help_text)
