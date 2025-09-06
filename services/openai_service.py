@@ -58,6 +58,13 @@ class OpenAIService:
                 ]
             )
             
+            # Log token usage
+            if hasattr(response, 'usage'):
+                usage = response.usage
+                logger.info(f"Token usage - Input: {usage.prompt_tokens}, Output: {usage.completion_tokens}, Total: {usage.total_tokens}")
+            else:
+                logger.warning("No token usage information available in response")
+            
             result = response.choices[0].message.content.strip()
             logger.info("Successfully analyzed meal with OpenAI")
             return result
