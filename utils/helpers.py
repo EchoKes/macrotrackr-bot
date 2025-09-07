@@ -13,22 +13,23 @@ logger = logging.getLogger(__name__)
 
 def get_daily_window_timestamps() -> Tuple[datetime, datetime]:
     """
-    Get start and end timestamps for the current 24-hour cycle (5am to 5am).
+    Get start and end timestamps for the current 24-hour cycle (9pm to 9pm UTC).
+    9pm UTC = 5am Singapore time (GMT+8).
     Returns tuple of (start_timestamp, end_timestamp).
     """
     now = datetime.now()
     
-    # Get today's 5am
-    today_5am = now.replace(hour=5, minute=0, second=0, microsecond=0)
+    # Get today's 9pm UTC (equivalent to 5am Singapore time)
+    today_9pm = now.replace(hour=21, minute=0, second=0, microsecond=0)
     
-    # If current time is before 5am, use yesterday's 5am as start
-    if now.hour < 5:
-        start_time = today_5am - timedelta(days=1)
-        end_time = today_5am
+    # If current time is before 9pm UTC, use yesterday's 9pm as start
+    if now.hour < 21:
+        start_time = today_9pm - timedelta(days=1)
+        end_time = today_9pm
     else:
-        # If current time is after 5am, use today's 5am as start
-        start_time = today_5am
-        end_time = today_5am + timedelta(days=1)
+        # If current time is after 9pm UTC, use today's 9pm as start
+        start_time = today_9pm
+        end_time = today_9pm + timedelta(days=1)
     
     return start_time, end_time
 
