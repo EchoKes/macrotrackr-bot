@@ -4,6 +4,7 @@ Refactored for better code organization and maintainability.
 """
 import logging
 import traceback
+import threading
 from flask import Flask, request, jsonify
 from typing import Dict, Any
 
@@ -188,17 +189,10 @@ def test_channel_endpoint():
         }), 500
 
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Handle incoming Telegram webhook updates."""
+def process_webhook_update(update: Dict[str, Any]) -> None:
+    """Process webhook update in background thread."""
     try:
-        update = request.get_json()
-        
-        if not update:
-            logger.warning("Received empty webhook update")
-            return jsonify({'status': 'error', 'message': 'No data received'}), 400
-        
-        logger.info(f"Received webhook update: {update.get('update_id', 'unknown')}")
+        logger.info(f"Processing webhook update: {update.get('update_id', 'unknown')}")
         
         # Handle message
         if 'message' in update:
@@ -244,7 +238,29 @@ def webhook():
                     help_text = TelegramService.get_help_text()
                     TelegramService.send_message(chat_id, help_text)
         
-        return jsonify({'status': 'ok'}), 200
+    except Exception as e:
+        logger.error(f"Background webhook processing error: {e}\n{traceback.format_exc()}")
+
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Handle incoming Telegram webhook updates with fast ACK."""
+    try:
+        update = request.get_json()
+        
+        if not update:
+            logger.warning("Received empty webhook update")
+            return jsonify({'status': 'error', 'message': 'No data received'}), 400
+        
+        # Immediately acknowledge the webhook with 200 status
+        response = jsonify({'status': 'ok'})
+        
+        # Process the update in a background thread to prevent Telegram retries
+        thread = threading.Thread(target=process_webhook_update, args=(update,))
+        thread.daemon = True
+        thread.start()
+        
+        return response, 200
         
     except Exception as e:
         logger.error(f"Webhook error: {e}\n{traceback.format_exc()}")
