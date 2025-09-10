@@ -96,6 +96,7 @@ class TelegramService:
             "and I'll analyze the calories and macros for you!\n\n"
             "Commands:\n"
             "• /progress - View your daily calorie progress\n"
-            "• /resetprogress - Reset your daily calorie progress\n\n"
+            "• /resetprogress - Reset your daily calorie progress\n"
+            "• /deletelast - Delete your most recent meal submission\n\n"
             "Example: Send a photo with caption 'Grilled chicken breast with rice and vegetables'"
         )

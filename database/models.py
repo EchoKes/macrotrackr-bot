@@ -91,3 +91,70 @@ class MealCalorie:
         except Exception as e:
             logger.error(f"Failed to reset daily calories: {e}")
             return False
+
+    @staticmethod
+    def delete_last_meal(user_id: int) -> tuple[bool, Optional[dict]]:
+        """
+        Delete the most recent meal submission for a user.
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            Tuple of (success, deleted_meal_info)
+            deleted_meal_info contains calories and meal_analysis if successful
+        """
+        try:
+            conn = get_db_connection()
+            if not conn:
+                return False, None
+            
+            with conn.cursor() as cur:
+                # First, get the most recent meal to return its info
+                cur.execute("""
+                    SELECT calories, meal_analysis, created_at
+                    FROM meal_calories
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, (user_id,))
+                
+                result = cur.fetchone()
+                if not result:
+                    conn.close()
+                    logger.info(f"No meals found to delete for user {user_id}")
+                    return False, None
+                
+                calories, meal_analysis, created_at = result
+                meal_info = {
+                    'calories': calories,
+                    'meal_analysis': meal_analysis,
+                    'created_at': created_at
+                }
+                
+                # Delete the most recent meal
+                cur.execute("""
+                    DELETE FROM meal_calories
+                    WHERE user_id = %s AND created_at = (
+                        SELECT created_at FROM meal_calories
+                        WHERE user_id = %s
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    )
+                """, (user_id, user_id))
+                
+                deleted_count = cur.rowcount
+            
+            conn.commit()
+            conn.close()
+            
+            if deleted_count > 0:
+                logger.info(f"Deleted most recent meal ({calories} calories) for user {user_id}")
+                return True, meal_info
+            else:
+                logger.warning(f"No meal was deleted for user {user_id}")
+                return False, None
+            
+        except Exception as e:
+            logger.error(f"Failed to delete last meal: {e}")
+            return False, None

@@ -233,6 +233,24 @@ def process_webhook_update(update: Dict[str, Any]) -> None:
                     else:
                         TelegramService.send_message(chat_id, "❌ Failed to reset daily progress. Please try again.")
                 
+                # Check for /deletelast command
+                elif text.lower() == '/deletelast':
+                    delete_success, deleted_meal = MealCalorie.delete_last_meal(user_id)
+                    
+                    if delete_success and deleted_meal:
+                        # Show updated progress after deletion
+                        progress = ProgressService.calculate_daily_progress(user_id)
+                        progress_message = ProgressService.format_progress_message(progress)
+                        
+                        delete_message = (
+                            f"🗑️ *Last meal deleted for {user_name}*\n"
+                            f"Removed: {deleted_meal['calories']} calories\n\n"
+                            f"{progress_message}"
+                        )
+                        TelegramService.send_message(chat_id, delete_message)
+                    else:
+                        TelegramService.send_message(chat_id, "❌ No recent meal found to delete.")
+                
                 else:
                     # Send help message for other text messages
                     help_text = TelegramService.get_help_text()
