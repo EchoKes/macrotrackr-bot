@@ -142,6 +142,12 @@ def health_check():
         }), 500
 
 
+@app.route('/cron', methods=['GET'])
+def cron_health():
+    """Lightweight health check for cron jobs."""
+    return '', 204
+
+
 @app.route('/init-db', methods=['GET'])
 def init_db_endpoint():
     """Manual database initialization endpoint."""
